@@ -1,0 +1,545 @@
+import pygame
+import requests
+
+# Initialize Pygame
+pygame.init()
+# Game window settings
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 600
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("Roman Arena - Stickman Battle")
+
+# Define some basic colors
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GRAY = (192, 192, 192)
+GREEN = (0, 255, 0)
+RED = (255, 0, 0)
+# Other colors for UI elements
+BLUE = (0, 200, 255)
+DARKGRAY = (50, 50, 50)
+
+# Initialize fonts
+pygame.font.init()
+
+# Button class for menu and selection options
+class Button:
+    def __init__(self, x, y, width, height, text='', color=GRAY, hover_color=None, font_size=40):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.text = text
+        self.color = color
+        self.default_color = color
+        # If no hover_color specified, use a darker shade for hover
+        if hover_color:
+            self.hover_color = hover_color
+        else:
+            r = max(color[0] - 50, 0); g = max(color[1] - 50, 0); b = max(color[2] - 50, 0)
+            self.hover_color = (r, g, b)
+        # Prepare font and rendered text
+        self.font = pygame.font.SysFont('Arial', font_size)
+        self.text_surface = self.font.render(self.text, True, BLACK)
+        # Center the text within the button rectangle
+        self.text_rect = self.text_surface.get_rect(center=self.rect.center)
+
+    def draw(self, surface):
+        pygame.draw.rect(surface, self.color, self.rect)
+        surface.blit(self.text_surface, self.text_rect)
+
+    def is_over(self, pos):
+        return self.rect.collidepoint(pos)
+
+    def set_hover(self, is_hovering):
+        # Change color when hovering or revert when not
+        self.color = self.hover_color if is_hovering else self.default_color
+
+# Function to draw a stickman at a given position (x, y = center of head)
+def draw_stickman(surface, x, y, color=BLACK):
+    head_radius = 10
+    # Head
+    pygame.draw.circle(surface, color, (x, y), head_radius)
+    # Body
+    body_start = (x, y + head_radius)
+    body_end = (x, y + head_radius + 20)
+    pygame.draw.line(surface, color, body_start, body_end, width=3)
+    # Arms
+    arm_y = y + head_radius + 10
+    pygame.draw.line(surface, color, (x, arm_y), (x - 15, arm_y + 10), width=3)
+    pygame.draw.line(surface, color, (x, arm_y), (x + 15, arm_y + 10), width=3)
+    # Legs
+    pygame.draw.line(surface, color, body_end, (x - 10, y + head_radius + 35), width=3)
+    pygame.draw.line(surface, color, body_end, (x + 10, y + head_radius + 35), width=3)
+
+# Fetch monster data from Open5e API
+def fetch_monsters(limit=5, offset=0):
+    url = f"https://api.open5e.com/monsters/?limit={limit}&offset={offset}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            monsters = []
+            for m in results:
+                name = m.get("name", "Monster")
+                hp = m.get("hit_points", 100)
+                monsters.append({"name": name, "hit_points": hp})
+            return monsters
+        else:
+            print(f"API request failed with status {response.status_code}")
+    except Exception as e:
+        print("Error fetching monsters from API:", e)
+    # Fallback data if API call fails
+    return [
+        {"name": "Fighter", "hit_points": 100},
+        {"name": "Archer", "hit_points": 80},
+        {"name": "Mage", "hit_points": 60},
+        {"name": "Goblin", "hit_points": 30},
+        {"name": "Dragon", "hit_points": 300},
+    ]
+
+# Load background image
+bg_img = None
+try:
+    bg_img = pygame.image.load("bg.png")
+    bg_img = pygame.transform.scale(bg_img, (SCREEN_WIDTH, SCREEN_HEIGHT))
+except:
+    print("Warning: bg.png not found, using solid color background.")
+
+# Game state and related variables
+state = "menu"
+running = True
+
+# Selection options and data
+char_options = []      # list of monsters for character selection
+boss_options = []      # list of monsters for boss selection
+char_buttons = []      # Button objects for character options
+boss_buttons = []      # Button objects for boss options
+selected_player = None
+selected_boss = None
+
+# Player and Boss stats
+player_hp = 0
+player_max_hp = 0
+boss_hp = 0
+boss_max_hp = 0
+
+# Player and Boss positions (we'll set when starting game)
+player_x = 0
+player_y = 0
+boss_x = 0
+boss_y = 0
+
+# Rectangles for collision (stickman approximate hitbox)
+player_rect = pygame.Rect(0, 0, 0, 0)
+boss_rect = pygame.Rect(0, 0, 0, 0)
+
+# Bullet lists
+player_bullets = []  # each bullet: {"rect": rect, "dx": velocity_x}
+boss_bullets = []
+player_bullet_speed = 7
+boss_bullet_speed = 7
+player_bullet_damage = 10
+boss_bullet_damage = 5
+
+# Boss attack timing
+boss_attack_interval = 2000  # in milliseconds (2 seconds)
+last_boss_attack_time = 0
+
+# Pause menu buttons
+pause_buttons = []
+
+# Game over flag/message
+game_over_message = ""
+
+clock = pygame.time.Clock()
+while running:
+    clock.tick(60)  # 60 FPS
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+            break
+        if event.type == pygame.KEYDOWN:
+            if state == "playing":
+                if event.key == pygame.K_ESCAPE:
+                    # Enter pause state
+                    state = "paused"
+                    # Create pause menu buttons
+                    pause_buttons = []
+                    options = ["Resume", "Restart", "Help", "Quit"]
+                    btn_width, btn_height = 200, 50
+                    spacing = 10
+                    total_h = len(options) * btn_height + (len(options)-1)*spacing
+                    start_y = SCREEN_HEIGHT/2 - total_h/2
+                    for i, text in enumerate(options):
+                        x = SCREEN_WIDTH/2 - btn_width/2
+                        y = int(start_y + i * (btn_height + spacing))
+                        # Green for Resume, Red for Quit, gray for others
+                        color = GREEN if text == "Resume" else RED if text == "Quit" else GRAY
+                        btn = Button(x, y, btn_width, btn_height, text=text, color=color, font_size=30)
+                        pause_buttons.append(btn)
+                elif event.key == pygame.K_SPACE:
+                    # Player shoots
+                    bullet_x = player_x + 15
+                    bullet_y = player_y
+                    bullet_rect = pygame.Rect(bullet_x, bullet_y, 8, 4)
+                    player_bullets.append({"rect": bullet_rect, "dx": player_bullet_speed})
+            elif state == "paused":
+                if event.key == pygame.K_ESCAPE:
+                    # Resume game
+                    state = "playing"
+            elif state == "help":
+                if event.key == pygame.K_ESCAPE:
+                    # Back to pause menu
+                    state = "paused"
+            elif state == "game_over":
+                if event.key == pygame.K_r:
+                    # Restart the battle with same player/boss
+                    if selected_player and selected_boss:
+                        player_hp = player_max_hp
+                        boss_hp = boss_max_hp
+                        # Reset positions
+                        player_x = 50; player_y = SCREEN_HEIGHT // 2
+                        boss_x = SCREEN_WIDTH - 50; boss_y = SCREEN_HEIGHT // 2
+                        player_rect = pygame.Rect(player_x - 10, player_y - 10, 20, 55)
+                        boss_rect = pygame.Rect(boss_x - 10, boss_y - 10, 20, 55)
+                        player_bullets.clear()
+                        boss_bullets.clear()
+                        last_boss_attack_time = pygame.time.get_ticks()
+                    state = "playing"
+                if event.key == pygame.K_q:
+                    running = False
+        if event.type == pygame.MOUSEMOTION:
+            pos = event.pos
+            if state == "char_select":
+                for btn in char_buttons:
+                    btn.set_hover(btn.is_over(pos))
+            elif state == "boss_select":
+                for btn in boss_buttons:
+                    btn.set_hover(btn.is_over(pos))
+            elif state == "paused":
+                for btn in pause_buttons:
+                    btn.set_hover(btn.is_over(pos))
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mx, my = event.pos
+            if state == "menu":
+                # Main menu button areas
+                start_w, start_h = 200, 60
+                quit_w, quit_h = 200, 60
+                start_x = SCREEN_WIDTH/2 - start_w/2
+                start_y = SCREEN_HEIGHT/2 - start_h - 10
+                quit_x = SCREEN_WIDTH/2 - quit_w/2
+                quit_y = SCREEN_HEIGHT/2 + 10
+                start_rect = pygame.Rect(start_x, start_y, start_w, start_h)
+                quit_rect = pygame.Rect(quit_x, quit_y, quit_w, quit_h)
+                if start_rect.collidepoint(mx, my):
+                    # Fetch characters and go to selection
+                    char_options = fetch_monsters(limit=5, offset=0)
+                    char_buttons = []
+                    if char_options:
+                        # Determine button size based on longest name
+                        font = pygame.font.SysFont('Arial', 30)
+                        max_name_width = max(font.size(m['name'])[0] for m in char_options)
+                        btn_w = max_name_width + 20
+                        btn_h = 40
+                        spacing = 10
+                        total_h = len(char_options)*btn_h + (len(char_options)-1)*spacing
+                        start_list_y = SCREEN_HEIGHT/2 - total_h/2
+                        for i, monster in enumerate(char_options):
+                            name = monster['name']
+                            x = SCREEN_WIDTH/2 - btn_w/2
+                            y = int(start_list_y + i*(btn_h + spacing))
+                            btn = Button(x, y, btn_w, btn_h, text=name, color=BLUE, font_size=30)
+                            char_buttons.append(btn)
+                    state = "char_select"
+                elif quit_rect.collidepoint(mx, my):
+                    running = False
+            elif state == "char_select":
+                for i, btn in enumerate(char_buttons):
+                    if btn.is_over((mx, my)):
+                        # Player character chosen
+                        selected_player = char_options[i]
+                        player_max_hp = selected_player['hit_points']
+                        player_hp = player_max_hp
+                        # Fetch boss options
+                        boss_options = fetch_monsters(limit=5, offset=5)
+                        boss_buttons = []
+                        if boss_options:
+                            font = pygame.font.SysFont('Arial', 30)
+                            max_name_width = max(font.size(m['name'])[0] for m in boss_options)
+                            btn_w = max_name_width + 20
+                            btn_h = 40
+                            spacing = 10
+                            total_h = len(boss_options)*btn_h + (len(boss_options)-1)*spacing
+                            start_list_y = SCREEN_HEIGHT/2 - total_h/2
+                            for j, monster in enumerate(boss_options):
+                                name = monster['name']
+                                x = SCREEN_WIDTH/2 - btn_w/2
+                                y = int(start_list_y + j*(btn_h + spacing))
+                                btn = Button(x, y, btn_w, btn_h, text=name, color=BLUE, font_size=30)
+                                boss_buttons.append(btn)
+                        state = "boss_select"
+                        break
+            elif state == "boss_select":
+                for i, btn in enumerate(boss_buttons):
+                    if btn.is_over((mx, my)):
+                        # Boss chosen
+                        selected_boss = boss_options[i]
+                        boss_max_hp = selected_boss['hit_points']
+                        boss_hp = boss_max_hp
+                        # Initialize positions
+                        player_x = 50; player_y = SCREEN_HEIGHT // 2
+                        boss_x = SCREEN_WIDTH - 50; boss_y = SCREEN_HEIGHT // 2
+                        player_rect = pygame.Rect(player_x - 10, player_y - 10, 20, 55)
+                        boss_rect = pygame.Rect(boss_x - 10, boss_y - 10, 20, 55)
+                        player_bullets.clear()
+                        boss_bullets.clear()
+                        last_boss_attack_time = pygame.time.get_ticks()
+                        state = "playing"
+                        break
+            elif state == "paused":
+                for btn in pause_buttons:
+                    if btn.is_over((mx, my)):
+                        text = btn.text
+                        if text == "Resume":
+                            state = "playing"
+                        elif text == "Restart":
+                            # Reset HP and positions
+                            if selected_player and selected_boss:
+                                player_hp = player_max_hp
+                                boss_hp = boss_max_hp
+                                player_x = 50; player_y = SCREEN_HEIGHT // 2
+                                boss_x = SCREEN_WIDTH - 50; boss_y = SCREEN_HEIGHT // 2
+                                player_rect = pygame.Rect(player_x - 10, player_y - 10, 20, 55)
+                                boss_rect = pygame.Rect(boss_x - 10, boss_y - 10, 20, 55)
+                                player_bullets.clear()
+                                boss_bullets.clear()
+                                last_boss_attack_time = pygame.time.get_ticks()
+                            state = "playing"
+                        elif text == "Help":
+                            state = "help"
+                        elif text == "Quit":
+                            running = False
+                        break
+
+    if not running:
+        break
+
+    # Render according to current state
+    if state == "menu":
+        screen.fill(DARKGRAY)
+        # Title text
+        title_font = pygame.font.SysFont('Arial', 50)
+        title_surf = title_font.render("Roman Arena - Stickman Battle", True, WHITE)
+        title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 150))
+        screen.blit(title_surf, title_rect)
+        # Draw Start and Quit buttons
+        btn_font = pygame.font.SysFont('Arial', 36)
+        start_surf = btn_font.render("Start Game", True, BLACK)
+        quit_surf = btn_font.render("Quit", True, BLACK)
+        start_w, start_h = 200, 60
+        quit_w, quit_h = 200, 60
+        start_x = SCREEN_WIDTH//2 - start_w//2; start_y = SCREEN_HEIGHT//2 - start_h - 10
+        quit_x = SCREEN_WIDTH//2 - quit_w//2; quit_y = SCREEN_HEIGHT//2 + 10
+        start_rect = pygame.Rect(start_x, start_y, start_w, start_h)
+        quit_rect = pygame.Rect(quit_x, quit_y, quit_w, quit_h)
+        # Change color on hover
+        mX, mY = pygame.mouse.get_pos()
+        start_col = GREEN if start_rect.collidepoint(mX, mY) else (0, 200, 0)
+        quit_col = RED if quit_rect.collidepoint(mX, mY) else (200, 0, 0)
+        pygame.draw.rect(screen, start_col, start_rect)
+        pygame.draw.rect(screen, quit_col, quit_rect)
+        screen.blit(start_surf, start_surf.get_rect(center=start_rect.center))
+        screen.blit(quit_surf, quit_surf.get_rect(center=quit_rect.center))
+        pygame.display.flip()
+
+    elif state == "char_select":
+        screen.fill(BLACK)
+        prompt_font = pygame.font.SysFont('Arial', 36)
+        prompt_text = prompt_font.render("Select Your Character", True, WHITE)
+        screen.blit(prompt_text, prompt_text.get_rect(center=(SCREEN_WIDTH//2, 100)))
+        for btn in char_buttons:
+            btn.draw(screen)
+        pygame.display.flip()
+
+    elif state == "boss_select":
+        screen.fill(BLACK)
+        prompt_font = pygame.font.SysFont('Arial', 36)
+        prompt_text = prompt_font.render("Select Boss", True, WHITE)
+        screen.blit(prompt_text, prompt_text.get_rect(center=(SCREEN_WIDTH//2, 100)))
+        for btn in boss_buttons:
+            btn.draw(screen)
+        pygame.display.flip()
+
+    elif state == "playing":
+        # Update player movement
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_LEFT]:  player_x -= 5
+        if keys[pygame.K_RIGHT]: player_x += 5
+        if keys[pygame.K_UP]:    player_y -= 5
+        if keys[pygame.K_DOWN]:  player_y += 5
+        # Boundaries
+        if player_x < 20: player_x = 20
+        if player_x > SCREEN_WIDTH/2 - 20: player_x = SCREEN_WIDTH/2 - 20
+        if player_y < 20: player_y = 20
+        if player_y > SCREEN_HEIGHT - 20: player_y = SCREEN_HEIGHT - 20
+        player_rect.topleft = (player_x - 10, player_y - 10)
+        boss_rect.topleft = (boss_x - 10, boss_y - 10)  # boss static
+
+        # Boss auto-attack
+        now = pygame.time.get_ticks()
+        current_interval = boss_attack_interval
+        if boss_max_hp > 0 and boss_hp < 0.3 * boss_max_hp:
+            current_interval = boss_attack_interval // 2  # rage mode (faster attacks)
+        if now - last_boss_attack_time >= current_interval:
+            # Boss shoots toward player
+            bullet_x = boss_x - 20
+            bullet_y = player_y
+            bullet_rect = pygame.Rect(bullet_x, bullet_y, 8, 4)
+            boss_bullets.append({"rect": bullet_rect, "dx": -boss_bullet_speed})
+            last_boss_attack_time = now
+
+        # Update bullets
+        for pb in player_bullets[:]:
+            pb["rect"].x += pb["dx"]
+            if pb["rect"].x > SCREEN_WIDTH:
+                player_bullets.remove(pb)
+                continue
+            if pb["rect"].colliderect(boss_rect):
+                boss_hp -= player_bullet_damage
+                player_bullets.remove(pb)
+        for bb in boss_bullets[:]:
+            bb["rect"].x += bb["dx"]
+            if bb["rect"].x < 0:
+                boss_bullets.remove(bb)
+                continue
+            if bb["rect"].colliderect(player_rect):
+                player_hp -= boss_bullet_damage
+                boss_bullets.remove(bb)
+
+        # Check win/lose
+        if player_hp <= 0 or boss_hp <= 0:
+            if boss_hp <= 0 and player_hp > 0:
+                game_over_message = "You Win!"
+            elif player_hp <= 0 and boss_hp > 0:
+                game_over_message = "Game Over!"
+            else:
+                game_over_message = "Draw!"
+            state = "game_over"
+
+        # Draw game scene
+        if bg_img:
+            screen.blit(bg_img, (0, 0))
+        else:
+            screen.fill((100, 100, 100))
+        draw_stickman(screen, player_x, player_y, color=BLACK)
+        draw_stickman(screen, boss_x, boss_y, color=BLACK)
+        for pb in player_bullets:
+            pygame.draw.rect(screen, GREEN, pb["rect"])
+        for bb in boss_bullets:
+            pygame.draw.rect(screen, RED, bb["rect"])
+        # HP text
+        hp_font = pygame.font.SysFont('Arial', 24)
+        player_hp_surf = hp_font.render(f"Player HP: {player_hp}", True, WHITE)
+        boss_hp_surf = hp_font.render(f"Boss HP: {boss_hp}", True, WHITE)
+        screen.blit(player_hp_surf, (10, 10))
+        screen.blit(boss_hp_surf, boss_hp_surf.get_rect(topright=(SCREEN_WIDTH - 10, 10)))
+        pygame.display.flip()
+
+    elif state == "paused":
+        # Draw last game frame
+        if bg_img:
+            screen.blit(bg_img, (0, 0))
+        else:
+            screen.fill((100, 100, 100))
+        draw_stickman(screen, player_x, player_y, color=BLACK)
+        draw_stickman(screen, boss_x, boss_y, color=BLACK)
+        for pb in player_bullets:
+            pygame.draw.rect(screen, GREEN, pb["rect"])
+        for bb in boss_bullets:
+            pygame.draw.rect(screen, RED, bb["rect"])
+        # Draw HP on pause
+        hp_font = pygame.font.SysFont('Arial', 24)
+        player_hp_surf = hp_font.render(f"Player HP: {player_hp}", True, WHITE)
+        boss_hp_surf = hp_font.render(f"Boss HP: {boss_hp}", True, WHITE)
+        screen.blit(player_hp_surf, (10, 10))
+        screen.blit(boss_hp_surf, boss_hp_surf.get_rect(topright=(SCREEN_WIDTH - 10, 10)))
+        # Dark overlay
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(180)
+        overlay.fill(BLACK)
+        screen.blit(overlay, (0, 0))
+        # Menu title
+        menu_font = pygame.font.SysFont('Arial', 40)
+        paused_text = menu_font.render("Paused", True, WHITE)
+        screen.blit(paused_text, paused_text.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 - 100)))
+        # Menu options
+        for btn in pause_buttons:
+            btn.draw(screen)
+        pygame.display.flip()
+
+    elif state == "help":
+        # Show game scene under help overlay
+        if bg_img:
+            screen.blit(bg_img, (0, 0))
+        else:
+            screen.fill((50, 50, 50))
+        draw_stickman(screen, player_x, player_y, color=BLACK)
+        draw_stickman(screen, boss_x, boss_y, color=BLACK)
+        for pb in player_bullets:
+            pygame.draw.rect(screen, GREEN, pb["rect"])
+        for bb in boss_bullets:
+            pygame.draw.rect(screen, RED, bb["rect"])
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(200)
+        overlay.fill(BLACK)
+        screen.blit(overlay, (0, 0))
+        # Help text
+        help_font = pygame.font.SysFont('Arial', 30)
+        help_lines = [
+            "Controls:",
+            "- Arrow keys to move",
+            "- Spacebar to attack",
+            "- Esc to pause",
+            "",
+            "Goal: Reduce the Boss HP to 0 to win.",
+            "When Boss HP < 30%, it attacks faster (Rage Mode)."
+        ]
+        for idx, line in enumerate(help_lines):
+            text_surf = help_font.render(line, True, WHITE)
+            screen.blit(text_surf, text_surf.get_rect(center=(SCREEN_WIDTH//2, 150 + idx*40)))
+        info_surf = help_font.render("Press Esc to return", True, WHITE)
+        screen.blit(info_surf, info_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT - 50)))
+        pygame.display.flip()
+
+    elif state == "game_over":
+        # Show final frame
+        if bg_img:
+            screen.blit(bg_img, (0, 0))
+        else:
+            screen.fill(BLACK)
+        draw_stickman(screen, player_x, player_y, color=BLACK)
+        draw_stickman(screen, boss_x, boss_y, color=BLACK)
+        for pb in player_bullets:
+            pygame.draw.rect(screen, GREEN, pb["rect"])
+        for bb in boss_bullets:
+            pygame.draw.rect(screen, RED, bb["rect"])
+        # Final HP display
+        hp_font = pygame.font.SysFont('Arial', 24)
+        player_hp_surf = hp_font.render(f"Player HP: {player_hp}", True, WHITE)
+        boss_hp_surf = hp_font.render(f"Boss HP: {boss_hp}", True, WHITE)
+        screen.blit(player_hp_surf, (10, 10))
+        screen.blit(boss_hp_surf, boss_hp_surf.get_rect(topright=(SCREEN_WIDTH - 10, 10)))
+        # Overlay and message
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(180)
+        overlay.fill(BLACK)
+        screen.blit(overlay, (0, 0))
+        result_font = pygame.font.SysFont('Arial', 50)
+        msg_surf = result_font.render(game_over_message, True, WHITE)
+        screen.blit(msg_surf, msg_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 - 50)))
+        prompt_font = pygame.font.SysFont('Arial', 30)
+        prompt_surf = prompt_font.render("Press R to Restart or Q to Quit", True, WHITE)
+        screen.blit(prompt_surf, prompt_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 + 20)))
+        pygame.display.flip()
+
+# Quit Pygame properly
+pygame.quit()
